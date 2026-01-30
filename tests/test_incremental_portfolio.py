@@ -214,13 +214,13 @@ class TestTradingFeeSimplePortfolio:
         """Test that negative trading fee raises ValueError."""
         market_prices = np.array([0.14, 0.29, 0.44])
 
-        with pytest.raises(ValueError, match="trading_fee must be non-negative"):
+        with pytest.raises(ValueError, match="trading_fee_cents must be non-negative"):
             optimize_simple_portfolio(
                 model=simple_model,
                 market_prices=market_prices,
                 budget=1000.0,
                 min_theta=-10.0,
-                trading_fee=-0.001,
+                trading_fee_cents=-0.1,
             )
 
     def test_fee_reduces_edge(self, simple_model: HazardRateModel) -> None:
@@ -234,7 +234,7 @@ class TestTradingFeeSimplePortfolio:
             min_theta=-10.0,
             target_delta=0.0,
             delta_tolerance=10.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
 
         result_with_fee = optimize_simple_portfolio(
@@ -244,7 +244,7 @@ class TestTradingFeeSimplePortfolio:
             min_theta=-10.0,
             target_delta=0.0,
             delta_tolerance=10.0,
-            trading_fee=0.001,  # 0.1 cent fee
+            trading_fee_cents=0.1,  # 0.1 cent fee
         )
 
         # Edge should be lower with fee
@@ -261,7 +261,7 @@ class TestTradingFeeSimplePortfolio:
             min_theta=-10.0,
             target_delta=0.0,
             delta_tolerance=10.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
 
         result_with_fee = optimize_simple_portfolio(
@@ -271,7 +271,7 @@ class TestTradingFeeSimplePortfolio:
             min_theta=-10.0,
             target_delta=0.0,
             delta_tolerance=10.0,
-            trading_fee=0.01,  # 1 cent fee
+            trading_fee_cents=1.0,  # 1 cent fee
         )
 
         # Both should solve successfully
@@ -294,7 +294,7 @@ class TestTradingFeeSimplePortfolio:
             min_theta=-10.0,
             target_delta=0.0,
             delta_tolerance=10.0,
-            trading_fee=0.001,
+            trading_fee_cents=0.1,  # 0.1 cent
         )
 
         assert result.solver_status == "optimal"
@@ -312,7 +312,7 @@ class TestTradingFeeSimplePortfolio:
             current_positions=current_positions,
             target_delta=0.0,
             delta_tolerance=5.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
 
         result_with_fee = optimize_simple_portfolio(
@@ -323,7 +323,7 @@ class TestTradingFeeSimplePortfolio:
             current_positions=current_positions,
             target_delta=0.0,
             delta_tolerance=5.0,
-            trading_fee=0.001,
+            trading_fee_cents=0.1,  # 0.1 cent
         )
 
         # Both should solve successfully

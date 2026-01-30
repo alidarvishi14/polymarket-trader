@@ -120,7 +120,7 @@ class OptimizationConfig:
         turnover_penalty: Penalty for total position size (reduces turnover).
         hedge_types: Set of hedging constraints to apply.
         hedge_tolerance: Tolerance for hedging constraints (soft constraints if > 0).
-        trading_fee: Fixed trading fee per contract in dollars (e.g., 0.001 for 0.1 cent).
+        trading_fee_cents: Fixed trading fee per contract in cents (e.g., 0.1 for 0.1 cent).
 
     """
 
@@ -130,7 +130,7 @@ class OptimizationConfig:
     turnover_penalty: float
     hedge_types: set[HedgeType] = field(default_factory=set)
     hedge_tolerance: float = 0.0
-    trading_fee: float = 0.0
+    trading_fee_cents: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -142,8 +142,15 @@ class OptimizationConfig:
             raise ValueError(f"max_concentration must be in (0, 1], got {self.max_concentration}")
         if self.turnover_penalty < 0:
             raise ValueError(f"turnover_penalty must be non-negative, got {self.turnover_penalty}")
-        if self.trading_fee < 0:
-            raise ValueError(f"trading_fee must be non-negative, got {self.trading_fee}")
+        if self.trading_fee_cents < 0:
+            raise ValueError(
+                f"trading_fee_cents must be non-negative, got {self.trading_fee_cents}"
+            )
+
+    @property
+    def trading_fee(self) -> float:
+        """Get trading fee in dollars (converts from cents)."""
+        return self.trading_fee_cents / 100.0
 
 
 class PortfolioOptimizer:

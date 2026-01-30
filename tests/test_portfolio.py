@@ -472,13 +472,13 @@ class TestTradingFees:
 
     def test_negative_trading_fee_raises(self) -> None:
         """Test that negative trading fee raises ValueError."""
-        with pytest.raises(ValueError, match="trading_fee must be non-negative"):
+        with pytest.raises(ValueError, match="trading_fee_cents must be non-negative"):
             OptimizationConfig(
                 budget=1000.0,
                 min_edge_per_leg=0.0,
                 max_concentration=0.5,
                 turnover_penalty=0.0,
-                trading_fee=-0.001,
+                trading_fee_cents=-0.1,
             )
 
     def test_zero_fee_default(self) -> None:
@@ -489,7 +489,20 @@ class TestTradingFees:
             max_concentration=0.5,
             turnover_penalty=0.0,
         )
+        assert config.trading_fee_cents == 0.0
         assert config.trading_fee == 0.0
+
+    def test_fee_converts_cents_to_dollars(self) -> None:
+        """Test that trading_fee property converts cents to dollars."""
+        config = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee_cents=0.1,  # 0.1 cent
+        )
+        assert config.trading_fee_cents == 0.1
+        assert config.trading_fee == 0.001  # $0.001
 
     def test_fee_reduces_total_edge(
         self,
@@ -502,14 +515,14 @@ class TestTradingFees:
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
         config_with_fee = OptimizationConfig(
             budget=1000.0,
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.001,  # 0.1 cent per contract
+            trading_fee_cents=0.1,  # 0.1 cent per contract
         )
 
         optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)
@@ -532,14 +545,14 @@ class TestTradingFees:
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
         config_with_fee = OptimizationConfig(
             budget=1000.0,
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.01,  # Larger fee for clearer effect
+            trading_fee_cents=1.0,  # 1 cent fee for clearer effect
         )
 
         optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)
@@ -574,14 +587,14 @@ class TestTradingFees:
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.0,
+            trading_fee_cents=0.0,
         )
         config_high_fee = OptimizationConfig(
             budget=1000.0,
             min_edge_per_leg=0.0,
             max_concentration=0.5,
             turnover_penalty=0.0,
-            trading_fee=0.10,  # Very high fee: 10 cents
+            trading_fee_cents=10.0,  # Very high fee: 10 cents
         )
 
         optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)

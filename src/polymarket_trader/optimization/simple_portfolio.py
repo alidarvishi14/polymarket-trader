@@ -97,7 +97,7 @@ def optimize_simple_portfolio(
     target_theta: float | None = None,
     delta_tolerance: float | None = None,
     theta_tolerance: float | None = None,
-    trading_fee: float = 0.0,
+    trading_fee_cents: float = 0.0,
 ) -> SimplePortfolioResult:
     """Optimize portfolio with 4-variable formulation supporting position closing.
 
@@ -119,7 +119,7 @@ def optimize_simple_portfolio(
         target_theta: Target theta exposure. If None, only min_theta is used.
         delta_tolerance: Tolerance band for delta. If None, uses strict equality.
         theta_tolerance: Tolerance band for theta. If None, only min_theta is used.
-        trading_fee: Fixed trading fee per contract in dollars (e.g., 0.001 for 0.1 cent).
+        trading_fee_cents: Fixed trading fee per contract in cents (e.g., 0.1 for 0.1 cent).
 
     Returns:
         SimplePortfolioResult with optimal trades and final positions.
@@ -128,8 +128,11 @@ def optimize_simple_portfolio(
         ValueError: If optimization fails or required prices missing.
 
     """
-    if trading_fee < 0:
-        raise ValueError(f"trading_fee must be non-negative, got {trading_fee}")
+    if trading_fee_cents < 0:
+        raise ValueError(f"trading_fee_cents must be non-negative, got {trading_fee_cents}")
+
+    # Convert fee from cents to dollars
+    trading_fee = trading_fee_cents / 100.0
     n = len(market_prices)
 
     if use_spread:
