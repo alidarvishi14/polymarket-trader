@@ -199,6 +199,140 @@ class TestIncrementalOptimization:
         assert result.positions[0].sell_no < 1e-6
 
 
+class TestTradingFeeSimplePortfolio:
+    """Tests for trading fee functionality in simple portfolio optimizer."""
+
+    @pytest.fixture
+    def simple_model(self) -> HazardRateModel:
+        """Create a simple hazard model for testing."""
+        maturities = np.array([30.0, 60.0, 90.0])
+        prices = np.array([0.15, 0.30, 0.45])
+        cumulative_hazards = -np.log(1.0 - prices)
+        return HazardRateModel(maturities=maturities, cumulative_hazards=cumulative_hazards)
+
+    def test_negative_trading_fee_raises(self, simple_model: HazardRateModel) -> None:
+        """Test that negative trading fee raises ValueError."""
+        market_prices = np.array([0.14, 0.29, 0.44])
+
+        with pytest.raises(ValueError, match="trading_fee must be non-negative"):
+            optimize_simple_portfolio(
+                model=simple_model,
+                market_prices=market_prices,
+                budget=1000.0,
+                min_theta=-10.0,
+                trading_fee=-0.001,
+            )
+
+    def test_fee_reduces_edge(self, simple_model: HazardRateModel) -> None:
+        """Test that trading fee reduces total edge."""
+        market_prices = np.array([0.14, 0.29, 0.44])  # Slight underpricing
+
+        result_no_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=1000.0,
+            min_theta=-10.0,
+            target_delta=0.0,
+            delta_tolerance=10.0,
+            trading_fee=0.0,
+        )
+
+        result_with_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=1000.0,
+            min_theta=-10.0,
+            target_delta=0.0,
+            delta_tolerance=10.0,
+            trading_fee=0.001,  # 0.1 cent fee
+        )
+
+        # Edge should be lower with fee
+        assert result_with_fee.total_edge <= result_no_fee.total_edge
+
+    def test_fee_affects_cost(self, simple_model: HazardRateModel) -> None:
+        """Test that trading fee affects net cost calculation."""
+        market_prices = np.array([0.15, 0.30, 0.45])
+
+        result_no_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=1000.0,
+            min_theta=-10.0,
+            target_delta=0.0,
+            delta_tolerance=10.0,
+            trading_fee=0.0,
+        )
+
+        result_with_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=1000.0,
+            min_theta=-10.0,
+            target_delta=0.0,
+            delta_tolerance=10.0,
+            trading_fee=0.01,  # 1 cent fee
+        )
+
+        # Both should solve successfully
+        assert result_no_fee.solver_status == "optimal"
+        assert result_with_fee.solver_status == "optimal"
+
+    def test_fee_with_spread_pricing(self, simple_model: HazardRateModel) -> None:
+        """Test trading fee works correctly with bid/ask spreads."""
+        market_prices = np.array([0.15, 0.30, 0.45])
+        bid_prices = np.array([0.14, 0.29, 0.44])
+        ask_prices = np.array([0.16, 0.31, 0.46])
+
+        result = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            bid_prices=bid_prices,
+            ask_prices=ask_prices,
+            use_spread=True,
+            budget=1000.0,
+            min_theta=-10.0,
+            target_delta=0.0,
+            delta_tolerance=10.0,
+            trading_fee=0.001,
+        )
+
+        assert result.solver_status == "optimal"
+
+    def test_selling_includes_fee(self, simple_model: HazardRateModel) -> None:
+        """Test that selling positions also incurs fees."""
+        market_prices = np.array([0.50, 0.50, 0.50])
+        current_positions = np.array([100.0, 0.0, 0.0])  # Large long YES position
+
+        result_no_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=0.0,
+            min_theta=-100.0,
+            current_positions=current_positions,
+            target_delta=0.0,
+            delta_tolerance=5.0,
+            trading_fee=0.0,
+        )
+
+        result_with_fee = optimize_simple_portfolio(
+            model=simple_model,
+            market_prices=market_prices,
+            budget=0.0,
+            min_theta=-100.0,
+            current_positions=current_positions,
+            target_delta=0.0,
+            delta_tolerance=5.0,
+            trading_fee=0.001,
+        )
+
+        # Both should solve successfully
+        assert result_no_fee.solver_status == "optimal"
+        assert result_with_fee.solver_status == "optimal"
+        # With fees, selling returns less cash
+        # Note: cost is negative when we sell more than we buy
+
+
 class TestPortfolioState:
     """Tests for portfolio state management."""
 

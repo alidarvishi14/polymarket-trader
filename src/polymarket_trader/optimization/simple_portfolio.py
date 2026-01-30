@@ -97,6 +97,7 @@ def optimize_simple_portfolio(
     target_theta: float | None = None,
     delta_tolerance: float | None = None,
     theta_tolerance: float | None = None,
+    trading_fee: float = 0.0,
 ) -> SimplePortfolioResult:
     """Optimize portfolio with 4-variable formulation supporting position closing.
 
@@ -118,6 +119,7 @@ def optimize_simple_portfolio(
         target_theta: Target theta exposure. If None, only min_theta is used.
         delta_tolerance: Tolerance band for delta. If None, uses strict equality.
         theta_tolerance: Tolerance band for theta. If None, only min_theta is used.
+        trading_fee: Fixed trading fee per contract in dollars (e.g., 0.001 for 0.1 cent).
 
     Returns:
         SimplePortfolioResult with optimal trades and final positions.
@@ -126,6 +128,8 @@ def optimize_simple_portfolio(
         ValueError: If optimization fails or required prices missing.
 
     """
+    if trading_fee < 0:
+        raise ValueError(f"trading_fee must be non-negative, got {trading_fee}")
     n = len(market_prices)
 
     if use_spread:
@@ -160,34 +164,37 @@ def optimize_simple_portfolio(
     bucket_hazards = model.bucket_hazards  # λ
 
     # ==========================================================================
-    # PRICING: Determine costs and revenues for each action
+    # PRICING: Determine costs and revenues for each action (including fees)
     # ==========================================================================
+    # Trading fee is paid on every trade (buy or sell)
+    # Buy: effective price increases by fee
+    # Sell: effective revenue decreases by fee
     if use_spread:
         # With spread: different prices for buying vs selling
-        buy_yes_price = ask_prices  # Pay ask to buy YES
-        sell_yes_price = bid_prices  # Receive bid when selling YES
-        buy_no_price = 1.0 - bid_prices  # Pay (1 - bid) to buy NO
-        sell_no_price = 1.0 - ask_prices  # Receive (1 - ask) when selling NO
+        buy_yes_price = ask_prices + trading_fee  # Pay ask + fee to buy YES
+        sell_yes_price = bid_prices - trading_fee  # Receive bid - fee when selling YES
+        buy_no_price = 1.0 - bid_prices + trading_fee  # Pay (1 - bid) + fee to buy NO
+        sell_no_price = 1.0 - ask_prices - trading_fee  # Receive (1 - ask) - fee when selling NO
     else:
         # Mid-market: symmetric pricing
-        buy_yes_price = market_prices
-        sell_yes_price = market_prices
-        buy_no_price = 1.0 - market_prices
-        sell_no_price = 1.0 - market_prices
+        buy_yes_price = market_prices + trading_fee
+        sell_yes_price = market_prices - trading_fee
+        buy_no_price = 1.0 - market_prices + trading_fee
+        sell_no_price = 1.0 - market_prices - trading_fee
 
     # ==========================================================================
-    # EDGE CALCULATION
+    # EDGE CALCULATION (prices already include trading fees)
     # ==========================================================================
     # Edge = expected value change - cash paid (or + cash received)
-    # Buy YES:  EV = P_model, Cost = buy_yes_price, Edge = P_model - buy_yes_price
-    # Sell YES: EV lost = P_model, Revenue = sell_yes_price, Edge = sell_yes_price - P_model
-    # Buy NO:   EV = 1 - P_model, Cost = buy_no_price, Edge = (1-P_model) - buy_no_price
-    # Sell NO:  EV lost = 1 - P_model, Revenue = sell_no_price, Edge = sell_no_price - (1-P_model)
+    # Buy YES:  EV = P_model, Cost = buy_yes_price (ask + fee), Edge = P_model - (ask + fee)
+    # Sell YES: EV lost = P_model, Revenue = sell_yes_price (bid - fee), Edge = (bid - fee) - P_model
+    # Buy NO:   EV = 1 - P_model, Cost = buy_no_price (1 - bid + fee), Edge = (1 - P_model) - (1 - bid + fee)
+    # Sell NO:  EV lost = 1 - P_model, Revenue = sell_no_price (1 - ask - fee), Edge = (1 - ask - fee) - (1 - P_model)
 
     edge_buy_yes = model_prices - buy_yes_price
     edge_sell_yes = sell_yes_price - model_prices
-    edge_buy_no = (1.0 - model_prices) - buy_no_price  # = bid - model (with spread)
-    edge_sell_no = sell_no_price - (1.0 - model_prices)  # = model - ask (with spread)
+    edge_buy_no = (1.0 - model_prices) - buy_no_price
+    edge_sell_no = sell_no_price - (1.0 - model_prices)
 
     # ==========================================================================
     # DECISION VARIABLES (4 per maturity)

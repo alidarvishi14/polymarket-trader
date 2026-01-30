@@ -120,6 +120,7 @@ class OptimizationConfig:
         turnover_penalty: Penalty for total position size (reduces turnover).
         hedge_types: Set of hedging constraints to apply.
         hedge_tolerance: Tolerance for hedging constraints (soft constraints if > 0).
+        trading_fee: Fixed trading fee per contract in dollars (e.g., 0.001 for 0.1 cent).
 
     """
 
@@ -129,6 +130,7 @@ class OptimizationConfig:
     turnover_penalty: float
     hedge_types: set[HedgeType] = field(default_factory=set)
     hedge_tolerance: float = 0.0
+    trading_fee: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -140,6 +142,8 @@ class OptimizationConfig:
             raise ValueError(f"max_concentration must be in (0, 1], got {self.max_concentration}")
         if self.turnover_penalty < 0:
             raise ValueError(f"turnover_penalty must be non-negative, got {self.turnover_penalty}")
+        if self.trading_fee < 0:
+            raise ValueError(f"trading_fee must be non-negative, got {self.trading_fee}")
 
 
 class PortfolioOptimizer:
@@ -207,16 +211,19 @@ class PortfolioOptimizer:
         survival_probs = self._model.survival_probabilities
         bucket_hazards = self._model.bucket_hazards
 
+        # Get trading fee from config
+        fee = self._config.trading_fee
+
         # Decision variables: YES and NO positions
         x = cp.Variable(n, nonneg=True, name="yes_positions")  # YES
         y = cp.Variable(n, nonneg=True, name="no_positions")  # NO
         z = x - y  # Net exposure
 
-        # Edge calculation
-        # YES edge: P^theo - P^ask (buy YES when underpriced)
-        # NO edge: P^bid - P^theo (buy NO when overpriced)
-        yes_edge = theo_prices - ask_prices
-        no_edge = bid_prices - theo_prices
+        # Edge calculation (after accounting for trading fee)
+        # YES edge: P^theo - P^ask - fee (buy YES when underpriced, fee reduces edge)
+        # NO edge: P^bid - P^theo - fee (buy NO when overpriced, fee reduces edge)
+        yes_edge = theo_prices - ask_prices - fee
+        no_edge = bid_prices - theo_prices - fee
 
         # Objective: maximize total edge minus turnover penalty
         objective_expr = cp.sum(cp.multiply(yes_edge, x)) + cp.sum(cp.multiply(no_edge, y))
@@ -229,9 +236,9 @@ class PortfolioOptimizer:
         # Constraints
         constraints = []
 
-        # Budget constraint: cost of all positions
-        yes_costs = ask_prices  # Cost to buy YES
-        no_costs = 1.0 - bid_prices  # Cost to buy NO (pay 1-bid to seller)
+        # Budget constraint: cost of all positions (including trading fees)
+        yes_costs = ask_prices + fee  # Cost to buy YES includes fee
+        no_costs = 1.0 - bid_prices + fee  # Cost to buy NO includes fee
         total_cost = cp.sum(cp.multiply(yes_costs, x)) + cp.sum(cp.multiply(no_costs, y))
         constraints.append(total_cost <= self._config.budget)
 
@@ -335,7 +342,8 @@ class PortfolioOptimizer:
             no_q = float(y_opt[i])
             net = yes_q - no_q
 
-            cost = yes_q * ask_prices[i] + no_q * (1 - bid_prices[i])
+            # Cost includes trading fees
+            cost = yes_q * (ask_prices[i] + fee) + no_q * (1 - bid_prices[i] + fee)
             ev = yes_q * theo_prices[i] + no_q * (1 - theo_prices[i])
             edge = ev - cost
 

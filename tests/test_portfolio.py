@@ -422,6 +422,185 @@ class TestPortfolioOptimizer:
         assert abs(result.delta_exposure) <= 0.1 + 1e-6
 
 
+class TestTradingFees:
+    """Tests for trading fee functionality."""
+
+    @pytest.fixture
+    def sample_model(self) -> HazardRateModel:
+        """Create a sample hazard rate model."""
+        maturities = np.array([30.0, 60.0, 90.0, 120.0])
+        cumulative_hazards = np.array([0.1, 0.25, 0.45, 0.7])
+        return HazardRateModel(maturities=maturities, cumulative_hazards=cumulative_hazards)
+
+    @pytest.fixture
+    def sample_data(self) -> list[MaturityData]:
+        """Create sample market data with mispricings."""
+        return [
+            MaturityData(
+                maturity=30.0,
+                market_price=0.08,
+                bid_price=0.07,
+                ask_price=0.09,
+                volume=1000.0,
+                contract_id="contract-30",
+            ),
+            MaturityData(
+                maturity=60.0,
+                market_price=0.25,
+                bid_price=0.24,
+                ask_price=0.26,
+                volume=800.0,
+                contract_id="contract-60",
+            ),
+            MaturityData(
+                maturity=90.0,
+                market_price=0.35,
+                bid_price=0.34,
+                ask_price=0.36,
+                volume=600.0,
+                contract_id="contract-90",
+            ),
+            MaturityData(
+                maturity=120.0,
+                market_price=0.52,
+                bid_price=0.51,
+                ask_price=0.53,
+                volume=400.0,
+                contract_id="contract-120",
+            ),
+        ]
+
+    def test_negative_trading_fee_raises(self) -> None:
+        """Test that negative trading fee raises ValueError."""
+        with pytest.raises(ValueError, match="trading_fee must be non-negative"):
+            OptimizationConfig(
+                budget=1000.0,
+                min_edge_per_leg=0.0,
+                max_concentration=0.5,
+                turnover_penalty=0.0,
+                trading_fee=-0.001,
+            )
+
+    def test_zero_fee_default(self) -> None:
+        """Test that trading fee defaults to zero."""
+        config = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+        )
+        assert config.trading_fee == 0.0
+
+    def test_fee_reduces_total_edge(
+        self,
+        sample_model: HazardRateModel,
+        sample_data: list[MaturityData],
+    ) -> None:
+        """Test that trading fee reduces total edge."""
+        config_no_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.0,
+        )
+        config_with_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.001,  # 0.1 cent per contract
+        )
+
+        optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)
+        optimizer_with_fee = PortfolioOptimizer(model=sample_model, config=config_with_fee)
+
+        result_no_fee = optimizer_no_fee.optimize(sample_data)
+        result_with_fee = optimizer_with_fee.optimize(sample_data)
+
+        # Edge should be lower when fees are applied
+        assert result_with_fee.total_edge <= result_no_fee.total_edge
+
+    def test_fee_increases_cost_basis(
+        self,
+        sample_model: HazardRateModel,
+        sample_data: list[MaturityData],
+    ) -> None:
+        """Test that trading fee increases cost basis for positions."""
+        config_no_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.0,
+        )
+        config_with_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.01,  # Larger fee for clearer effect
+        )
+
+        optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)
+        optimizer_with_fee = PortfolioOptimizer(model=sample_model, config=config_with_fee)
+
+        result_no_fee = optimizer_no_fee.optimize(sample_data)
+        result_with_fee = optimizer_with_fee.optimize(sample_data)
+
+        # For same quantity, cost with fee should be higher
+        # Due to optimization, quantities may differ, so check total_cost / total quantity
+        total_qty_no_fee = sum(
+            p.yes_quantity + p.no_quantity for p in result_no_fee.positions
+        )
+        total_qty_with_fee = sum(
+            p.yes_quantity + p.no_quantity for p in result_with_fee.positions
+        )
+
+        if total_qty_with_fee > 0 and total_qty_no_fee > 0:
+            avg_cost_no_fee = result_no_fee.total_cost / total_qty_no_fee
+            avg_cost_with_fee = result_with_fee.total_cost / total_qty_with_fee
+            # Average cost per contract should be higher with fee
+            assert avg_cost_with_fee >= avg_cost_no_fee - 1e-6
+
+    def test_high_fee_eliminates_marginal_trades(
+        self,
+        sample_model: HazardRateModel,
+        sample_data: list[MaturityData],
+    ) -> None:
+        """Test that high trading fee eliminates marginal trades."""
+        config_no_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.0,
+        )
+        config_high_fee = OptimizationConfig(
+            budget=1000.0,
+            min_edge_per_leg=0.0,
+            max_concentration=0.5,
+            turnover_penalty=0.0,
+            trading_fee=0.10,  # Very high fee: 10 cents
+        )
+
+        optimizer_no_fee = PortfolioOptimizer(model=sample_model, config=config_no_fee)
+        optimizer_high_fee = PortfolioOptimizer(model=sample_model, config=config_high_fee)
+
+        result_no_fee = optimizer_no_fee.optimize(sample_data)
+        result_high_fee = optimizer_high_fee.optimize(sample_data)
+
+        # With high fees, fewer positions should be taken
+        total_positions_no_fee = sum(
+            p.yes_quantity + p.no_quantity for p in result_no_fee.positions
+        )
+        total_positions_high_fee = sum(
+            p.yes_quantity + p.no_quantity for p in result_high_fee.positions
+        )
+
+        assert total_positions_high_fee <= total_positions_no_fee
+
+
 class TestFactorWeights:
     """Tests for factor weight computation."""
 
