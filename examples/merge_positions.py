@@ -25,8 +25,13 @@ Requirements:
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import dataclass
+
+from dotenv import load_dotenv
+from eth_account import Account
+from web3 import Web3
 
 from polymarket_trader.data.authenticated_client import (
     AuthenticatedPolymarketClient,
@@ -42,6 +47,36 @@ logger = logging.getLogger(__name__)
 # Suppress noisy loggers
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("web3").setLevel(logging.WARNING)
+
+# Polygon network configuration
+POLYGON_RPC = "https://polygon-rpc.com"
+POLYGON_CHAIN_ID = 137
+
+# Polymarket CTF Exchange contract on Polygon
+# This contract handles merging YES+NO tokens back to collateral (USDC)
+CTF_EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+# Minimal ABI for mergePositions function
+# See: https://docs.polymarket.com/developers/CTF/merge
+CTF_EXCHANGE_ABI = [
+    {
+        "inputs": [
+            {"internalType": "contract IERC20", "name": "_collateral", "type": "address"},
+            {"internalType": "contract IConditionalTokens", "name": "_ctf", "type": "address"},
+            {"internalType": "bytes32", "name": "_conditionId", "type": "bytes32"},
+            {"internalType": "uint256", "name": "_amount", "type": "uint256"},
+        ],
+        "name": "mergePositions",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# USDC and CTF addresses on Polygon (mainnet)
+USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC on Polygon
+CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"  # Conditional Tokens Framework
 
 
 @dataclass
@@ -167,57 +202,105 @@ def print_mergeable_positions(mergeable: list[MergeablePosition]) -> None:
 
 
 def execute_merge(
-    client: AuthenticatedPolymarketClient,
     mergeable: MergeablePosition,
     quantity: float,
+    private_key: str,
 ) -> bool:
-    """Execute a merge transaction via CTF Exchange contract.
+    """Execute a merge transaction via CTF Exchange contract on Polygon.
 
     On Polymarket, merging burns YES+NO tokens and returns USDC:
     - CTF Exchange contract: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
-    - Function: mergePositions(conditionId, amount)
+    - Function: mergePositions(collateral, ctf, conditionId, amount)
 
     Args:
-        client: Authenticated Polymarket client.
         mergeable: The mergeable position pair.
         quantity: Amount to merge (will merge this many YES+NO pairs).
+        private_key: Private key for signing the transaction.
 
     Returns:
         True if successful, False otherwise.
 
     """
     try:
-        # Get the CLOB client
-        clob_client = client._get_clob_client()
+        # Connect to Polygon
+        w3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+        if not w3.is_connected():
+            logger.error("Failed to connect to Polygon RPC")
+            return False
 
-        # Merge uses the CTF Exchange contract
-        # The merge_positions call burns YES+NO tokens and returns USDC
+        # Get account from private key
+        account = Account.from_key(private_key)
+        sender_address = account.address
+
         logger.info(
             "Merging %d positions for condition %s...",
             int(quantity),
             mergeable.condition_id[:16],
         )
 
-        # Try to call merge_positions on the CLOB client
-        # This calls the CTF Exchange's mergePositions function
-        if hasattr(clob_client, "merge_positions"):
-            result = clob_client.merge_positions(
-                condition_id=mergeable.condition_id,
-                amount=int(quantity * 1_000_000),  # 6 decimal places
+        # Create contract instance
+        contract = w3.eth.contract(
+            address=Web3.to_checksum_address(CTF_EXCHANGE_ADDRESS),
+            abi=CTF_EXCHANGE_ABI,
+        )
+
+        # Amount in 6 decimal units (USDC precision)
+        amount_wei = int(quantity * 1_000_000)
+
+        # Build transaction
+        # conditionId must be bytes32, ensure it's properly formatted
+        condition_id_bytes = bytes.fromhex(
+            mergeable.condition_id[2:]
+            if mergeable.condition_id.startswith("0x")
+            else mergeable.condition_id
+        )
+
+        nonce = w3.eth.get_transaction_count(sender_address)
+        gas_price = w3.eth.gas_price
+
+        # Build the function call
+        tx = contract.functions.mergePositions(
+            Web3.to_checksum_address(USDC_ADDRESS),
+            Web3.to_checksum_address(CTF_ADDRESS),
+            condition_id_bytes,
+            amount_wei,
+        ).build_transaction(
+            {
+                "from": sender_address,
+                "nonce": nonce,
+                "gasPrice": gas_price,
+                "chainId": POLYGON_CHAIN_ID,
+            }
+        )
+
+        # Estimate gas
+        try:
+            gas_estimate = w3.eth.estimate_gas(tx)
+            tx["gas"] = int(gas_estimate * 1.2)  # 20% buffer
+        except Exception as e:
+            logger.warning("Gas estimation failed: %s. Using default gas limit.", e)
+            tx["gas"] = 300_000  # Default gas limit
+
+        # Sign transaction
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key)
+
+        # Send transaction
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        logger.info("Transaction sent: %s", tx_hash.hex())
+
+        # Wait for receipt
+        print(f"  Waiting for transaction confirmation...")
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        if receipt["status"] == 1:
+            logger.info(
+                "Merge successful! Tx: %s, Gas used: %d",
+                tx_hash.hex(),
+                receipt["gasUsed"],
             )
-            logger.info("Merge result: %s", result)
             return True
         else:
-            # Method not available - show manual instructions
-            print(
-                "\n  ⚠ py-clob-client does not have merge_positions method."
-                "\n  To merge manually, use the CTF Exchange contract directly:"
-                f"\n    Contract: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E (Polygon)"
-                f"\n    Function: mergePositions(bytes32 conditionId, uint256 amount)"
-                f"\n    conditionId: {mergeable.condition_id}"
-                f"\n    amount: {int(quantity * 1_000_000)} (in 6 decimal USDC units)"
-                "\n"
-            )
+            logger.error("Transaction failed! Tx: %s", tx_hash.hex())
             return False
 
     except Exception as e:
@@ -226,14 +309,14 @@ def execute_merge(
 
 
 def interactive_merge(
-    client: AuthenticatedPolymarketClient,
     mergeable: list[MergeablePosition],
+    private_key: str,
 ) -> None:
     """Interactive merge mode - let user select which positions to merge.
 
     Args:
-        client: Authenticated Polymarket client.
         mergeable: List of mergeable position pairs.
+        private_key: Private key for signing transactions.
 
     """
     if not mergeable:
@@ -283,8 +366,8 @@ def interactive_merge(
                 ).strip().lower()
 
                 if confirm in ("y", "yes"):
-                    print("  Executing merge...")
-                    success = execute_merge(client, m, quantity)
+                    print("  Executing merge on Polygon...")
+                    success = execute_merge(m, quantity, private_key)
                     if success:
                         print(f"  ✓ Successfully merged {quantity:.0f} pairs!")
                     else:
@@ -314,6 +397,9 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # Load environment variables
+    load_dotenv()
+
     try:
         # Initialize client
         client = AuthenticatedPolymarketClient.from_env()
@@ -332,14 +418,15 @@ def main() -> int:
 
         # Interactive merge if requested
         if args.merge:
-            if not client.has_private_key:
+            private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
+            if not private_key:
                 print(
                     "\nError: Private key required for merge execution. "
                     "Set POLYMARKET_PRIVATE_KEY in .env"
                 )
                 return 1
 
-            interactive_merge(client, mergeable)
+            interactive_merge(mergeable, private_key)
 
         return 0
 
