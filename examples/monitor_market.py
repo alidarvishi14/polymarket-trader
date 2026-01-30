@@ -173,6 +173,7 @@ def print_trade_recommendations(
     estimator: BayesianHazardEstimator,
     budget: float,
     positions: dict[str, tuple[float, float]] | None = None,
+    trading_fee_cents: float = 0.0,
 ) -> None:
     """Print trade recommendations.
 
@@ -182,6 +183,7 @@ def print_trade_recommendations(
         budget: Available budget.
         positions: Optional dict of contract_id -> (yes_size, no_size).
                   If provided, uses incremental optimization from current portfolio.
+        trading_fee_cents: Trading fee per contract in cents.
 
     """
     model = estimator.get_model()
@@ -217,6 +219,7 @@ def print_trade_recommendations(
         target_delta=0.0,
         delta_tolerance=10.0 if has_positions else 2.0,
         current_positions=current_positions,
+        trading_fee_cents=trading_fee_cents,
     )
 
     # Compute survival probs for delta/theta
@@ -368,6 +371,7 @@ def run_single_update(
     estimator: BayesianHazardEstimator,
     budget: float,
     fetch_positions_fn: Callable | None = None,
+    trading_fee_cents: float = 0.0,
 ) -> bool:
     """Run a single update cycle.
 
@@ -376,6 +380,7 @@ def run_single_update(
         estimator: Bayesian hazard estimator.
         budget: Budget for trade recommendations.
         fetch_positions_fn: Optional function(market_data) -> positions dict.
+        trading_fee_cents: Trading fee per contract in cents.
 
     Returns:
         True if successful, False if failed.
@@ -411,7 +416,7 @@ def run_single_update(
         # Print report
         print_header(event, estimator.state.n_updates)
         print_hazard_curve(market_data, estimator, positions)
-        print_trade_recommendations(market_data, estimator, budget, positions)
+        print_trade_recommendations(market_data, estimator, budget, positions, trading_fee_cents)
         print_estimator_status(estimator)
 
         return True
@@ -465,6 +470,12 @@ def main() -> int:
         "--live",
         action="store_true",
         help="Fetch live portfolio positions from Polymarket API (requires .env)",
+    )
+    parser.add_argument(
+        "--fee",
+        type=float,
+        default=0.0,
+        help="Trading fee per contract in cents (default: 0.0)",
     )
 
     args = parser.parse_args()
@@ -594,6 +605,8 @@ def main() -> int:
         if args.loop:
             # Continuous monitoring
             print(f"Starting continuous monitoring (interval: {args.interval}s)")
+            if args.fee > 0:
+                print(f"Trading fee: {args.fee} cents per contract")
             print("Press Ctrl+C to stop\n")
 
             while not shutdown_requested:
@@ -601,7 +614,9 @@ def main() -> int:
                 if args.live:
                     budget = fetch_live_balance()
 
-                success = run_single_update(args.event, estimator, budget, fetch_pos_fn)
+                success = run_single_update(
+                    args.event, estimator, budget, fetch_pos_fn, args.fee
+                )
 
                 if args.estimator_state and success:
                     save_estimator_state(estimator.state, estimator.config, args.estimator_state)
@@ -618,7 +633,7 @@ def main() -> int:
             print("\nMonitoring stopped.")
         else:
             # Single run
-            success = run_single_update(args.event, estimator, budget, fetch_pos_fn)
+            success = run_single_update(args.event, estimator, budget, fetch_pos_fn, args.fee)
 
             if args.estimator_state and success:
                 save_estimator_state(estimator.state, estimator.config, args.estimator_state)
