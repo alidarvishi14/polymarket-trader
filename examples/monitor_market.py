@@ -239,6 +239,9 @@ def print_trade_recommendations(
     )
     print("-" * 122)
 
+    # Convert fee from cents to dollars for edge calculation
+    fee = trading_fee_cents / 100.0
+
     has_trades = False
     for i, d in enumerate(market_data):
         pos = result.positions[i]
@@ -247,8 +250,10 @@ def print_trade_recommendations(
         theta_contrib = -net_pos * theta_weights[i]
 
         # Show trades (buy_yes, sell_yes, buy_no, sell_no)
+        # Edge = (theo - price - fee) * qty for buys
+        # Edge = (price - theo - fee) * qty for sells
         if pos.buy_yes > 0.01:
-            edge = pos.buy_yes * (model_prices[i] - d.ask_price)
+            edge = pos.buy_yes * (model_prices[i] - d.ask_price - fee)
             print(
                 f"{d.contract_id:<12} "
                 f"{'BUY YES':<10} "
@@ -262,7 +267,7 @@ def print_trade_recommendations(
             )
             has_trades = True
         if pos.sell_yes > 0.01:
-            edge = pos.sell_yes * (d.bid_price - model_prices[i])
+            edge = pos.sell_yes * (d.bid_price - model_prices[i] - fee)
             print(
                 f"{d.contract_id:<12} "
                 f"{'SELL YES':<10} "
@@ -276,7 +281,7 @@ def print_trade_recommendations(
             )
             has_trades = True
         if pos.buy_no > 0.01:
-            edge = pos.buy_no * (d.bid_price - model_prices[i])
+            edge = pos.buy_no * (d.bid_price - model_prices[i] - fee)
             theo_price = 1.0 - model_prices[i]
             print(
                 f"{d.contract_id:<12} "
@@ -291,7 +296,7 @@ def print_trade_recommendations(
             )
             has_trades = True
         if pos.sell_no > 0.01:
-            edge = pos.sell_no * (model_prices[i] - d.ask_price)
+            edge = pos.sell_no * (model_prices[i] - d.ask_price - fee)
             theo_price = 1.0 - model_prices[i]
             print(
                 f"{d.contract_id:<12} "
