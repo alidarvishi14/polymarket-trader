@@ -288,7 +288,7 @@ def print_trade_recommendations(
             )
             has_trades = True
         if pos.sell_no > 0.01:
-            edge = pos.sell_no * (model_prices[i] - d.bid_price)
+            edge = pos.sell_no * (model_prices[i] - d.ask_price)
             theo_price = 1.0 - model_prices[i]
             print(
                 f"{d.contract_id:<12} "
