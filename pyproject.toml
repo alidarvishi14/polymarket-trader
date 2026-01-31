@@ -18,10 +18,8 @@ dependencies = [
     "cvxpy>=1.4.0",
     "pandas>=2.0.0",
     "requests>=2.31.0",
-    "httpx[http2]>=0.25.0",
     "py-clob-client>=0.34.0",
     "python-dotenv>=1.0.0",
-    "web3>=6.0.0",
 ]
 
 [project.optional-dependencies]
