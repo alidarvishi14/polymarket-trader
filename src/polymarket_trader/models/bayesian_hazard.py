@@ -393,9 +393,9 @@ class BayesianHazardEstimator:
         # 1. Predict step: add process noise (scaled by time since last update)
         dt_seconds = (reference_time - self._state.timestamp).total_seconds()
         dt_minutes = max(dt_seconds / 60.0, 0.0)  # Convert to minutes, floor at 0
-        # Scale process noise by sqrt(dt) since variance scales linearly with time
-        # Use minutes as base unit (typical update interval)
-        time_scaled_process_var = self._config.process_noise_std**2 * max(dt_minutes, 1.0)
+        # Scale process noise linearly with time elapsed
+        # Use small floor (0.01 min = 0.6s) to avoid numerical issues, not 1.0
+        time_scaled_process_var = self._config.process_noise_std**2 * max(dt_minutes, 0.01)
         prior_sigma = self._state.sigma + np.eye(self._state.n_buckets) * time_scaled_process_var
         prior_uncertainty = np.trace(prior_sigma)
 

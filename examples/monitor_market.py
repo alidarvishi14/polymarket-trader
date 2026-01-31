@@ -457,8 +457,8 @@ def main() -> int:
     parser.add_argument(
         "--interval",
         type=int,
-        default=60,
-        help="Update interval in seconds (default: 60)",
+        default=30,
+        help="Update interval in seconds (default: 30)",
     )
     parser.add_argument(
         "--loop",
