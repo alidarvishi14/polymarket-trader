@@ -51,6 +51,7 @@ from polymarket_trader.models.bayesian_hazard import (
     BayesianHazardEstimator,
 )
 from polymarket_trader.models.hazard import MaturityData
+from polymarket_trader.notifications.telegram import TelegramAlerter, TelegramConfig
 from polymarket_trader.optimization.simple_portfolio import optimize_simple_portfolio
 from polymarket_trader.state.estimator_state import (
     load_estimator_state,
@@ -86,6 +87,7 @@ class MonitorConfig:
         rho: Correlation decay parameter.
         live: Fetch live portfolio positions.
         fee: Trading fee per contract in cents.
+        telegram: Telegram notification settings.
 
     """
 
@@ -97,6 +99,7 @@ class MonitorConfig:
     rho: float = 0.85
     live: bool = False
     fee: float = 0.0
+    telegram: TelegramConfig | None = None
 
     @classmethod
     def from_yaml(cls, path: Path) -> "MonitorConfig":
@@ -123,7 +126,14 @@ class MonitorConfig:
         if "estimator_state" in data and data["estimator_state"]:
             data["estimator_state"] = Path(data["estimator_state"])
 
-        return cls(**data)
+        # Parse telegram config if present
+        telegram_config = None
+        if "telegram" in data:
+            telegram_config = TelegramConfig.from_dict(data.pop("telegram"))
+
+        config = cls(**data)
+        config.telegram = telegram_config
+        return config
 
     def merge_cli_args(self, args: argparse.Namespace) -> "MonitorConfig":
         """Merge CLI arguments, CLI takes priority over config file.
@@ -145,6 +155,7 @@ class MonitorConfig:
             rho=self.rho,
             live=self.live,
             fee=self.fee,
+            telegram=self.telegram,  # Keep telegram config from file
         )
 
         # Override with CLI args if explicitly provided
@@ -294,14 +305,54 @@ def print_hazard_curve(
         print(f"  PORTFOLIO:  Delta = {total_delta:+.2f}  |  Theta = {total_theta:+.4f}")
 
 
+@dataclass
+class TradeRecommendation:
+    """A single trade recommendation for alerts.
+
+    Attributes:
+        contract: Contract ID.
+        action: Trade action (BUY YES, SELL YES, BUY NO, SELL NO).
+        qty: Quantity to trade.
+        price: Execution price.
+        edge: Expected edge from this trade.
+
+    """
+
+    contract: str
+    action: str
+    qty: float
+    price: float
+    edge: float
+
+
+@dataclass
+class OptimizationSummary:
+    """Summary of optimization result for alerts.
+
+    Attributes:
+        total_edge: Total expected edge.
+        total_cost: Total cost of trades.
+        delta: Final delta exposure.
+        theta: Final theta exposure.
+        trades: List of trade recommendations.
+
+    """
+
+    total_edge: float
+    total_cost: float
+    delta: float
+    theta: float
+    trades: list[TradeRecommendation]
+
+
 def print_trade_recommendations(
     market_data: list[MaturityData],
     estimator: BayesianHazardEstimator,
     budget: float,
     positions: dict[str, tuple[float, float]] | None = None,
     trading_fee_cents: float = 0.0,
-) -> None:
-    """Print trade recommendations.
+) -> OptimizationSummary:
+    """Print trade recommendations and return summary for alerts.
 
     Args:
         market_data: List of maturity data.
@@ -310,6 +361,9 @@ def print_trade_recommendations(
         positions: Optional dict of contract_id -> (yes_size, no_size).
                   If provided, uses incremental optimization from current portfolio.
         trading_fee_cents: Trading fee per contract in cents.
+
+    Returns:
+        OptimizationSummary with total edge, delta, theta, and trades.
 
     """
     model = estimator.get_model()
@@ -368,6 +422,9 @@ def print_trade_recommendations(
     # Convert fee from cents to dollars for edge calculation
     fee = trading_fee_cents / 100.0
 
+    # Collect trades for alert
+    trades: list[TradeRecommendation] = []
+
     has_trades = False
     for i, d in enumerate(market_data):
         pos = result.positions[i]
@@ -391,6 +448,10 @@ def print_trade_recommendations(
                 f"{theta_contrib:>+10.4f} "
                 f"${edge:>+10.4f}"
             )
+            trades.append(TradeRecommendation(
+                contract=d.contract_id, action="BUY YES",
+                qty=pos.buy_yes, price=d.ask_price, edge=edge,
+            ))
             has_trades = True
         if pos.sell_yes > 0.01:
             edge = pos.sell_yes * (d.bid_price - model_prices[i] - fee)
@@ -405,6 +466,10 @@ def print_trade_recommendations(
                 f"{theta_contrib:>+10.4f} "
                 f"${edge:>+10.4f}"
             )
+            trades.append(TradeRecommendation(
+                contract=d.contract_id, action="SELL YES",
+                qty=pos.sell_yes, price=d.bid_price, edge=edge,
+            ))
             has_trades = True
         if pos.buy_no > 0.01:
             edge = pos.buy_no * (d.bid_price - model_prices[i] - fee)
@@ -420,6 +485,10 @@ def print_trade_recommendations(
                 f"{theta_contrib:>+10.4f} "
                 f"${edge:>+10.4f}"
             )
+            trades.append(TradeRecommendation(
+                contract=d.contract_id, action="BUY NO",
+                qty=pos.buy_no, price=1 - d.bid_price, edge=edge,
+            ))
             has_trades = True
         if pos.sell_no > 0.01:
             edge = pos.sell_no * (model_prices[i] - d.ask_price - fee)
@@ -435,6 +504,10 @@ def print_trade_recommendations(
                 f"{theta_contrib:>+10.4f} "
                 f"${edge:>+10.4f}"
             )
+            trades.append(TradeRecommendation(
+                contract=d.contract_id, action="SELL NO",
+                qty=pos.sell_no, price=1 - d.ask_price, edge=edge,
+            ))
             has_trades = True
 
     if not has_trades:
@@ -445,6 +518,14 @@ def print_trade_recommendations(
     print(f"  Expected edge:  ${result.total_edge:>10.4f}")
     print(f"  Final delta:    {result.delta_exposure:>+10.2f}")
     print(f"  Final theta:    {result.theta_exposure:>+10.4f}")
+
+    return OptimizationSummary(
+        total_edge=result.total_edge,
+        total_cost=result.total_cost,
+        delta=result.delta_exposure,
+        theta=result.theta_exposure,
+        trades=trades,
+    )
 
 
 def print_estimator_status(estimator: BayesianHazardEstimator) -> None:
@@ -503,7 +584,7 @@ def run_single_update(
     budget: float,
     fetch_positions_fn: Callable | None = None,
     trading_fee_cents: float = 0.0,
-) -> bool:
+) -> OptimizationSummary | None:
     """Run a single update cycle.
 
     Args:
@@ -514,7 +595,7 @@ def run_single_update(
         trading_fee_cents: Trading fee per contract in cents.
 
     Returns:
-        True if successful, False if failed.
+        OptimizationSummary if successful, None if failed.
 
     """
     try:
@@ -523,14 +604,14 @@ def run_single_update(
 
         if not markets:
             print("  Failed to fetch market data")
-            return False
+            return None
 
         now_et = datetime.now(EASTERN_TZ)
         market_data = transform_to_maturity_data(markets, reference_time=now_et)
 
         if len(market_data) < 2:
             print(f"ERROR: Need at least 2 contracts, found {len(market_data)}")
-            return False
+            return None
 
         # Fetch positions if function provided (only needs market_data now since
         # token_ids are stored directly in MaturityData)
@@ -547,15 +628,17 @@ def run_single_update(
         # Print report
         print_header(event, estimator.state.n_updates)
         print_hazard_curve(market_data, estimator, positions)
-        print_trade_recommendations(market_data, estimator, budget, positions, trading_fee_cents)
+        summary = print_trade_recommendations(
+            market_data, estimator, budget, positions, trading_fee_cents
+        )
         print_estimator_status(estimator)
 
-        return True
+        return summary
 
     except Exception as e:
         logger.error("Update failed: %s", e, exc_info=True)
         print(f"\nERROR: {e}")
-        return False
+        return None
 
 
 def main() -> int:
@@ -773,6 +856,53 @@ Priority: CLI args > config file > defaults
     # Get budget (live or from config)
     budget = fetch_live_balance() if cfg.live else cfg.budget
 
+    # Initialize Telegram alerter if enabled
+    telegram_alerter: TelegramAlerter | None = None
+    if cfg.telegram and cfg.telegram.enabled:
+        telegram_alerter = TelegramAlerter.from_env()
+        if telegram_alerter:
+            print(f"Telegram alerts enabled (threshold: ${cfg.telegram.edge_threshold:.2f})")
+        else:
+            print("Warning: Telegram enabled but credentials not found in .env")
+
+    def maybe_send_alert(summary: OptimizationSummary) -> None:
+        """Send Telegram alert if conditions are met."""
+        if not telegram_alerter or not cfg.telegram:
+            return
+
+        if not telegram_alerter.should_alert(
+            edge=summary.total_edge,
+            threshold=cfg.telegram.edge_threshold,
+            cooldown_minutes=cfg.telegram.cooldown_minutes,
+        ):
+            return
+
+        # Format trades for alert
+        trades_for_alert = [
+            {
+                "contract": t.contract,
+                "action": t.action,
+                "qty": t.qty,
+                "price": t.price,
+                "edge": t.edge,
+            }
+            for t in summary.trades
+        ]
+
+        message = telegram_alerter.format_edge_alert(
+            event=cfg.event,
+            total_edge=summary.total_edge,
+            budget=budget,
+            trades=trades_for_alert,
+            delta=summary.delta,
+            theta=summary.theta,
+            include_trades=cfg.telegram.include_trades,
+            max_trades=cfg.telegram.max_trades,
+        )
+
+        if telegram_alerter.send_alert(message):
+            print(f"  📱 Telegram alert sent (edge: ${summary.total_edge:.2f})")
+
     try:
         if cfg.loop:
             # Continuous monitoring
@@ -786,12 +916,16 @@ Priority: CLI args > config file > defaults
                 if cfg.live:
                     budget = fetch_live_balance()
 
-                success = run_single_update(
+                summary = run_single_update(
                     cfg.event, estimator, budget, fetch_pos_fn, cfg.fee
                 )
 
-                if cfg.estimator_state and success:
+                if cfg.estimator_state and summary:
                     save_estimator_state(estimator.state, estimator.config, cfg.estimator_state)
+
+                # Send alert if edge exceeds threshold
+                if summary:
+                    maybe_send_alert(summary)
 
                 if shutdown_requested:
                     break
@@ -805,12 +939,16 @@ Priority: CLI args > config file > defaults
             print("\nMonitoring stopped.")
         else:
             # Single run
-            success = run_single_update(cfg.event, estimator, budget, fetch_pos_fn, cfg.fee)
+            summary = run_single_update(cfg.event, estimator, budget, fetch_pos_fn, cfg.fee)
 
-            if cfg.estimator_state and success:
+            if cfg.estimator_state and summary:
                 save_estimator_state(estimator.state, estimator.config, cfg.estimator_state)
 
-            return 0 if success else 1
+            # Send alert if edge exceeds threshold (even in single run mode)
+            if summary:
+                maybe_send_alert(summary)
+
+            return 0 if summary else 1
 
     except Exception as e:
         logger.error("Fatal error: %s", e, exc_info=True)

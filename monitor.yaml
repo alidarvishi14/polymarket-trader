@@ -27,20 +27,3 @@ live: true
 
 # Trading fee per contract in cents (e.g., 0.5 for half a cent)
 fee: 0.5
-
-# Telegram notifications (requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env)
-telegram:
-  # Enable/disable Telegram alerts
-  enabled: true
-
-  # Minimum total edge ($) to trigger an alert
-  edge_threshold: 50.0
-
-  # Minimum time between alerts (prevents spam)
-  cooldown_minutes: 5.0
-
-  # Include trade details in alert message
-  include_trades: true
-
-  # Maximum number of trades to show in alert
-  max_trades: 5
