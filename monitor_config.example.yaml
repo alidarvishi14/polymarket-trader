@@ -1,0 +1,29 @@
+# Example config file for monitor_market.py
+#
+# Usage:
+#   python examples/monitor_market.py --config monitor_config.yaml --loop
+#
+# Priority: CLI args > config file > defaults
+# CLI args will override any values set here.
+
+# Required: Polymarket event slug or URL
+event: us-strikes-iran-by
+
+# Path to estimator state file (will be created if doesn't exist)
+estimator_state: estimator.json
+
+# Budget for trade recommendations in USD
+budget: 5000
+
+# Update interval in seconds
+interval: 30
+
+# Correlation decay parameter for Bayesian estimator (0 < rho < 1)
+# Higher values = smoother hazard curve assumption
+rho: 0.85
+
+# Enable live portfolio mode (requires .env with POLYMARKET_* variables)
+live: true
+
+# Trading fee per contract in cents (e.g., 0.5 for half a cent)
+fee: 0.5

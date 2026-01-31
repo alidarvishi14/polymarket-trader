@@ -2,7 +2,7 @@
 """Real-time market monitor using Bayesian hazard estimator.
 
 This script:
-1. Fetches market data every minute
+1. Fetches market data at configurable intervals (default 30s)
 2. Updates Bayesian beliefs about hazard rates
 3. Outputs fitted curve and trade recommendations
 4. Assumes clean portfolio with $1000 budget for each recommendation
@@ -11,12 +11,20 @@ Usage:
     # Run once
     python examples/monitor_market.py --event us-strikes-iran-by
 
-    # Run continuously every minute
-    python examples/monitor_market.py --event us-strikes-iran-by --loop
+    # Run continuously with config file
+    python examples/monitor_market.py --config monitor.yaml --loop
 
-    # Run with existing estimator state
-    python examples/monitor_market.py --event us-strikes-iran-by \
-        --estimator-state estimator.json --loop
+    # CLI args override config file
+    python examples/monitor_market.py --config monitor.yaml --interval 60 --loop
+
+Config file format (YAML):
+    event: us-strikes-iran-by
+    estimator_state: estimator.json
+    budget: 5000
+    interval: 30
+    rho: 0.85
+    live: true
+    fee: 0.5
 """
 
 import argparse
@@ -25,10 +33,12 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from polymarket_trader.data import (
     AuthenticatedPolymarketClient,
@@ -59,6 +69,122 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # Global flag for graceful shutdown
 shutdown_requested = False
+
+
+@dataclass
+class MonitorConfig:
+    """Configuration for the market monitor.
+
+    Priority: CLI args > config file > defaults.
+
+    Attributes:
+        event: Polymarket event slug or URL.
+        estimator_state: Path to estimator state file.
+        budget: Budget for trade recommendations.
+        interval: Update interval in seconds.
+        loop: Run continuously.
+        rho: Correlation decay parameter.
+        live: Fetch live portfolio positions.
+        fee: Trading fee per contract in cents.
+
+    """
+
+    event: str | None = None
+    estimator_state: Path | None = None
+    budget: float = 1000.0
+    interval: int = 30
+    loop: bool = False
+    rho: float = 0.85
+    live: bool = False
+    fee: float = 0.0
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "MonitorConfig":
+        """Load config from YAML file.
+
+        Args:
+            path: Path to YAML config file.
+
+        Returns:
+            MonitorConfig with values from file.
+
+        Raises:
+            FileNotFoundError: If config file doesn't exist.
+            ValueError: If config file is invalid.
+
+        """
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+
+        # Convert estimator_state to Path if present
+        if "estimator_state" in data and data["estimator_state"]:
+            data["estimator_state"] = Path(data["estimator_state"])
+
+        return cls(**data)
+
+    def merge_cli_args(self, args: argparse.Namespace) -> "MonitorConfig":
+        """Merge CLI arguments, CLI takes priority over config file.
+
+        Args:
+            args: Parsed CLI arguments.
+
+        Returns:
+            New MonitorConfig with CLI overrides applied.
+
+        """
+        # Start with current values (from config file or defaults)
+        merged = MonitorConfig(
+            event=self.event,
+            estimator_state=self.estimator_state,
+            budget=self.budget,
+            interval=self.interval,
+            loop=self.loop,
+            rho=self.rho,
+            live=self.live,
+            fee=self.fee,
+        )
+
+        # Override with CLI args if explicitly provided
+        # We check if the arg was explicitly passed by comparing to argparse defaults
+        if args.event is not None:
+            merged.event = args.event
+        if args.estimator_state is not None:
+            merged.estimator_state = args.estimator_state
+        if args.budget != 1000.0:  # Default value
+            merged.budget = args.budget
+        if args.interval != 30:  # Default value
+            merged.interval = args.interval
+        if args.loop:  # Boolean flag, True if passed
+            merged.loop = True
+        if args.rho != 0.85:  # Default value
+            merged.rho = args.rho
+        if args.live:  # Boolean flag, True if passed
+            merged.live = True
+        if args.fee != 0.0:  # Default value
+            merged.fee = args.fee
+
+        return merged
+
+    def validate(self) -> None:
+        """Validate config values.
+
+        Raises:
+            ValueError: If required fields are missing or invalid.
+
+        """
+        if not self.event:
+            raise ValueError("Event is required. Pass --event or set 'event' in config file.")
+        if self.budget <= 0:
+            raise ValueError(f"Budget must be positive, got {self.budget}")
+        if self.interval <= 0:
+            raise ValueError(f"Interval must be positive, got {self.interval}")
+        if not 0 < self.rho < 1:
+            raise ValueError(f"Rho must be in (0, 1), got {self.rho}")
+        if self.fee < 0:
+            raise ValueError(f"Fee must be non-negative, got {self.fee}")
 
 
 def signal_handler(signum: int, frame: object) -> None:
@@ -435,12 +561,29 @@ def run_single_update(
 def main() -> int:
     """Run the market monitor CLI."""
     parser = argparse.ArgumentParser(
-        description="Real-time market monitor using Bayesian hazard estimator"
+        description="Real-time market monitor using Bayesian hazard estimator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Config file example (YAML):
+  event: us-strikes-iran-by
+  estimator_state: estimator.json
+  budget: 5000
+  interval: 30
+  rho: 0.85
+  live: true
+  fee: 0.5
+
+Priority: CLI args > config file > defaults
+        """,
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to YAML config file",
     )
     parser.add_argument(
         "--event",
         type=str,
-        required=True,
         help="Polymarket event slug or URL",
     )
     parser.add_argument(
@@ -485,31 +628,55 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # Load config: defaults -> config file -> CLI args
+    if args.config:
+        try:
+            cfg = MonitorConfig.from_yaml(args.config)
+            print(f"Loaded config from: {args.config}")
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            return 1
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return 1
+    else:
+        cfg = MonitorConfig()
+
+    # Merge CLI args (CLI takes priority)
+    cfg = cfg.merge_cli_args(args)
+
+    # Validate final config
+    try:
+        cfg.validate()
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
 
     # Initialize or load estimator
-    if args.estimator_state and args.estimator_state.exists():
-        state, config = load_estimator_state(args.estimator_state)
-        estimator = BayesianHazardEstimator(config)
+    if cfg.estimator_state and cfg.estimator_state.exists():
+        state, bayesian_config = load_estimator_state(cfg.estimator_state)
+        estimator = BayesianHazardEstimator(bayesian_config)
         estimator.state = state
         print(f"Loaded estimator state: n_updates={state.n_updates}")
     else:
-        config = BayesianHazardConfig(
-            rho=args.rho,
+        bayesian_config = BayesianHazardConfig(
+            rho=cfg.rho,
             log_lambda_std=0.3,
             obs_noise_scale=0.25,
             process_noise_std=0.01,
             min_variance=1e-4,
             isolation_penalty=2.0,
         )
-        estimator = BayesianHazardEstimator(config)
-        print(f"Initialized new estimator: rho={args.rho}")
+        estimator = BayesianHazardEstimator(bayesian_config)
+        print(f"Initialized new estimator: rho={cfg.rho}")
 
     # Initialize live portfolio if requested
     auth_client: AuthenticatedPolymarketClient | None = None
 
-    if args.live:
+    if cfg.live:
         try:
             auth_client = AuthenticatedPolymarketClient.from_env()
             print(
@@ -581,56 +748,56 @@ def main() -> int:
     def fetch_live_balance() -> float:
         """Fetch live USDC balance.
 
-        Falls back to --budget if API returns 0 (API often doesn't reflect actual balance).
+        Falls back to config budget if API returns 0 (API often doesn't reflect actual balance).
         """
         if not auth_client or not auth_client.has_private_key:
-            return args.budget
+            return cfg.budget
         try:
             balance = auth_client.fetch_balance()
             # CLOB balance = unspent USDC (not in positions)
-            # $0 is normal if all USDC is in positions - use --budget as buying power
+            # $0 is normal if all USDC is in positions - use budget as buying power
             if balance < 0.01:
                 logger.info(
-                    "CLOB balance: $0 (cash is in positions). Using --budget $%.2f as buying power",
-                    args.budget,
+                    "CLOB balance: $0 (cash is in positions). Using budget $%.2f as buying power",
+                    cfg.budget,
                 )
-                return args.budget
+                return cfg.budget
             return balance
         except Exception as e:
             logger.warning("Failed to fetch balance: %s", e)
-            return args.budget
+            return cfg.budget
 
     # Create position fetch function if live mode enabled
-    fetch_pos_fn = fetch_positions_mapped if args.live else None
+    fetch_pos_fn = fetch_positions_mapped if cfg.live else None
 
-    # Get budget (live or from args)
-    budget = fetch_live_balance() if args.live else args.budget
+    # Get budget (live or from config)
+    budget = fetch_live_balance() if cfg.live else cfg.budget
 
     try:
-        if args.loop:
+        if cfg.loop:
             # Continuous monitoring
-            print(f"Starting continuous monitoring (interval: {args.interval}s)")
-            if args.fee > 0:
-                print(f"Trading fee: {args.fee} cents per contract")
+            print(f"Starting continuous monitoring (interval: {cfg.interval}s)")
+            if cfg.fee > 0:
+                print(f"Trading fee: {cfg.fee} cents per contract")
             print("Press Ctrl+C to stop\n")
 
             while not shutdown_requested:
                 # Refresh balance each iteration if in live mode
-                if args.live:
+                if cfg.live:
                     budget = fetch_live_balance()
 
                 success = run_single_update(
-                    args.event, estimator, budget, fetch_pos_fn, args.fee
+                    cfg.event, estimator, budget, fetch_pos_fn, cfg.fee
                 )
 
-                if args.estimator_state and success:
-                    save_estimator_state(estimator.state, estimator.config, args.estimator_state)
+                if cfg.estimator_state and success:
+                    save_estimator_state(estimator.state, estimator.config, cfg.estimator_state)
 
                 if shutdown_requested:
                     break
 
                 # Wait for next interval
-                for _ in range(args.interval):
+                for _ in range(cfg.interval):
                     if shutdown_requested:
                         break
                     time.sleep(1)
@@ -638,10 +805,10 @@ def main() -> int:
             print("\nMonitoring stopped.")
         else:
             # Single run
-            success = run_single_update(args.event, estimator, budget, fetch_pos_fn, args.fee)
+            success = run_single_update(cfg.event, estimator, budget, fetch_pos_fn, cfg.fee)
 
-            if args.estimator_state and success:
-                save_estimator_state(estimator.state, estimator.config, args.estimator_state)
+            if cfg.estimator_state and success:
+                save_estimator_state(estimator.state, estimator.config, cfg.estimator_state)
 
             return 0 if success else 1
 
@@ -651,9 +818,9 @@ def main() -> int:
         return 1
 
     # Save state on exit
-    if args.estimator_state and estimator.is_initialized:
-        save_estimator_state(estimator.state, estimator.config, args.estimator_state)
-        print(f"Saved estimator state to: {args.estimator_state}")
+    if cfg.estimator_state and estimator.is_initialized:
+        save_estimator_state(estimator.state, estimator.config, cfg.estimator_state)
+        print(f"Saved estimator state to: {cfg.estimator_state}")
 
     return 0
 
